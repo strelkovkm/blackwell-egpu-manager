@@ -16,7 +16,6 @@ PLASMA_APPLET_DIR="$HOME/.local/share/plasma/plasmoids/com.github.blackwellegpu"
 GNOME_EXTENSION_DIR="$HOME/.local/share/gnome-shell/extensions/blackwell-egpu@com.github.blackwellegpu"
 TRAY_BIN="/usr/local/bin/blackwell-tray.py"
 AUTOSTART_FILE="$HOME/.config/autostart/blackwell-tray.desktop"
-MODPROBE_FILE="/etc/modprobe.d/99-blackwell-egpu.conf"
 
 echo "=== 1. Removing CLI backend and sudoers permissions ==="
 if [ -f "/usr/local/bin/blackwell-egpu" ]; then
