@@ -2,9 +2,50 @@
 
 All notable changes to the Blackwell eGPU Universal Manager project will be documented in this file.
 
+## [1.5.6] - 2026-09-08
+
+### 🔧 Fixes & Hardware Compatibility (AMD Strix Halo & Barlow Ridge Audit)
+
+* **Compositor & Session Guard in `set3`:**
+  * Replaced blanket `fuser -k /dev/nvidia*` termination with an explicit PID filter that protects `kwin_wayland` and `plasmashell`.
+  * Resolves Wayland compositor crashes, respawns, and dropped client sessions when initializing hybrid mode (Mode 3).
+
+* **Mitigated `udev modalias` Driver Parameter Race:**
+  * Added pre-emptive loading of `nvidia NVreg_DynamicPowerManagement=0x00` prior to any PCIe bus rescans.
+  * Prevents the kernel/udev autoload mechanism from initializing the GPU with default distribution power parameters (`DPM=2`).
+  * Intentionally omitted global `/etc/modprobe.d/` config file injection: the script's locked performance clocks and active persistence mode already prevent D3cold sleep states during runtime. Avoiding static modprobe files keeps the setup distribution-agnostic and prevents configuration breakage during upstream package and system updates.
+  
+* **Two-Phase Enumeration & BAR0 Allocation Recovery (`BAR0 is 0M @ 0x0`):**
+  * Added explicit BAR0 memory window validation via `/sys/bus/pci/devices/$GPU_FULL_PCI/resource` following the initial root port rescan.
+  * Acts as a non-intrusive safety guard (hardware/environment quirk): on standard, clean systems (both AMD and Intel) the check is completely transparent and adds zero delay, but if an enclosure has broken PCIe bridge tables, lacks HotPlug capability, or runs on a patched kernel causing `BAR0 is 0M @ 0x0`, the script automatically resets the upstream port to recover allocation instead of failing.
+
+* **Mode 6 Audio Restoration:**
+  * Added targeted recovery for audio devices (USB DACs, soundbars, laptop internal speakers) that lost initialization during DRM node teardown.
+  * Automatically re-emits `udevadm trigger --action=add` on affected sound cards, restoring them to PipeWire without requiring a system reboot or physical USB reconnect.
+
+* **Telemetry JSON Hardening:**
+  * Sanitized `nvidia-smi` telemetry queries with numeric regex guards (`^[0-9]`) and silent error fallbacks.
+  * Prevents NVML stdout error messages from corrupting the JSON payload sent to desktop applets.
+
+* **Installer & Uninstaller Privilege Checks:**
+  * Replaced unprivileged `[ -f ... ]` tests with `sudo test -f` when checking `/etc/sudoers.d/blackwell-egpu`.
+  * Fixes silent failures caused by `0750` root permissions on `/etc/sudoers.d/`, ensuring clean deployment and removal of NOPASSWD entries.
+  
+* **Privilege Guard for Action Dispatch (set):**
+  * Added an explicit non-blocking root privilege check ([ "$EUID" -ne 0 ]) at the entry of the set action handler.
+  * Safely aborts execution (exit 0) without modifying temporary state files ($STATE_FILE, $WAIT_FILE) if invoked without root permissions, preventing state corruption and unauthorized partial execution.
+  
+* **Privilege Guard for Action Dispatch (`set`):**
+  * Added an explicit non-blocking root privilege check (`[ "$EUID" -ne 0 ]`) at the entry of the `set` action handler.
+  * Safely aborts execution (`exit 0`) without modifying temporary state files (`$STATE_FILE`, `$WAIT_FILE`) if invoked without root permissions, preventing state corruption and unauthorized partial execution.
+  
+### ❤️ Community Acknowledgments
+  * Special thanks to **@David_Janice** from the CachyOS forums for his in-depth technical audits, detailed kernel/sysfs tracing, and real-world testing on AMD Strix Halo (ASUS ROG Flow Z13) and Barlow Ridge (Razer Core X V2) hardware. His findings and actionable suggestions directly contributed to the majority of the stability and compatibility improvements in this release.
+
 ## [1.5.5] - 2026-09-05
 
 ### Added
+
 * **Mode 6 (Safe Detach) – Selective Application Termination:** Implemented two-stage detection and termination for client processes actively rendering or computing on the eGPU using `nvidia-smi pmon` (`SIGTERM`, followed by `SIGKILL` on subsequent invocation).
 * **Two-Step Detach Protection:** When invoking Safe Detach (via applet or CLI), a graceful `SIGTERM` is issued first. If applications fail to exit in time, the card **is not removed** from the PCIe bus; a second invocation of `set 6` is required to force termination via `SIGKILL` and safely complete the detach sequence.
 * **Compositor & Session Safety:** Targeted process handling strictly isolates client applications running on the eGPU without terminating Wayland, KWin, or the user desktop session.

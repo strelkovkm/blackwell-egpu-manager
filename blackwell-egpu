@@ -62,11 +62,6 @@ fi
 # 2. FAST SYSFS CONNECTION VERIFICATION (Zero-Fork / Polling)
 # 2. SZYBKA WERYFIKACJA POŁĄCZENIA W SYSFS (Zero-Fork / Polling)
 # ==============================================================================
-# Detect Thunderbolt/USB4 child devices (exclude built-in root switches ending with -0)
-# Wykrywanie urządzeń podrzędnych Thunderbolt/USB4 (wykluczenie wbudowanych root switchy kończących się na -0)
-
-# If eGPU-only flag is set, lock mode to 4 and wait to 0
-# Jeśli flaga eGPU-only istnieje, wymuś mode 4 i wait 0
 if [ -f "$EGPU_ONLY_FILE" ]; then
     echo "4" > "$STATE_FILE"
     echo "0" > "$WAIT_FILE"
@@ -86,8 +81,6 @@ if [ -z "$TB_DEVICE" ]; then
     fi
     exit 0
 else
-    # If state in memory is 0 and device is physically connected (Hot-Plug)
-    # Jeśli stan w pamięci to 0, a urządzenie zostało fizycznie podpięte (Hot-Plug)
     CURRENT_STATE=$(cat "$STATE_FILE" 2>/dev/null || echo "0")
     if [ "$CURRENT_STATE" = "0" ]; then
         if [ -f "$TB_DEVICE/authorized" ] && [ "$(<"$TB_DEVICE/authorized")" = "1" ]; then
@@ -124,30 +117,33 @@ if [ "$ACTION" = "status" ]; then
     PCIE_TX=0
 
     if [ "$CURRENT_MODE" -ge 3 ]; then
-        TELEMETRY=$(nvidia-smi --query-gpu=utilization.gpu,power.draw,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null || echo "0, 0, 0, 0, 0")
-        IFS=',' read -r GPU_UTIL PWR_CURR VRAM_USED VRAM_TOTAL GPU_TEMP <<< "$TELEMETRY"
+        TELEMETRY=$(nvidia-smi --query-gpu=utilization.gpu,power.draw,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null || true)
 
-        GPU_UTIL="${GPU_UTIL// /}"
-        PWR_CURR="${PWR_CURR// /}"
-        VRAM_USED="${VRAM_USED// /}"
-        VRAM_TOTAL="${VRAM_TOTAL// /}"
-        GPU_TEMP="${GPU_TEMP// /}"
+        if [ -n "$TELEMETRY" ] && [[ "$TELEMETRY" =~ ^[0-9] ]]; then
+            IFS=',' read -r GPU_UTIL PWR_CURR VRAM_USED VRAM_TOTAL GPU_TEMP <<< "$TELEMETRY"
+            GPU_UTIL="${GPU_UTIL// /}"
+            PWR_CURR="${PWR_CURR// /}"
+            VRAM_USED="${VRAM_USED// /}"
+            VRAM_TOTAL="${VRAM_TOTAL// /}"
+            GPU_TEMP="${GPU_TEMP// /}"
+        else
+            GPU_UTIL=0; PWR_CURR=0; VRAM_USED=0; VRAM_TOTAL=0; GPU_TEMP=0
+        fi
 
-        # Błyskawiczny odczyt zapisanego w cache transferu PCIe RX/TX (0ms opóźnienia)
         if [ -f "$TRAFFIC_CACHE" ]; then
             read -r PCIE_RX PCIE_TX < "$TRAFFIC_CACHE" 2>/dev/null || { PCIE_RX=0; PCIE_TX=0; }
         fi
     fi
 
+    # Zabezpieczenie przed niepoprawnym wyjściem w JSON
     printf '{"mode":%s,"wait":%s,"igpu":"%s","igpu2":"%s","egpu":"%s","egpu2":"%s","link":"%s","gpu_util":%s,"pwr_curr":%s,"vram_used":%s,"vram_total":%s,"temp":%s,"pcie_rx":%s,"pcie_tx":%s}\n' \
         "$CURRENT_MODE" "$IS_WAITING" "$IGPU_NAME" "$IGPU_NAME2" "$EGPU_NAME" "$EGPU_NAME2" "$PCIE_LINK" \
         "${GPU_UTIL:-0}" "${PWR_CURR:-0}" "${VRAM_USED:-0}" "${VRAM_TOTAL:-0}" "${GPU_TEMP:-0}" \
         "${PCIE_RX:-0}" "${PCIE_TX:-0}"
 
-    # Asynchroniczny pomiar PCIe dmon w tle na poczet kolejnego cyklu
     if [ "$CURRENT_MODE" -ge 3 ]; then
         (
-            NEW_METRICS=$(nvidia-smi dmon -s t -c 1 -d 2 2>/dev/null | awk 'NR>2 {print $2, $3}')
+            NEW_METRICS=$(nvidia-smi dmon -s t -c 1 -d 2 2>/dev/null | awk 'NR>2 {print $2, $3}' || true)
             if [ -n "$NEW_METRICS" ]; then
                 echo "$NEW_METRICS" > "$TRAFFIC_CACHE.tmp" && mv -f "$TRAFFIC_CACHE.tmp" "$TRAFFIC_CACHE"
             fi
@@ -178,17 +174,14 @@ negotiate_optimal_link_speed() {
         32*) echo "0025" ;; # Gen5
         16*) echo "0024" ;; # Gen4
         8*)  echo "0023" ;; # Gen3
-        *)   echo "0024" ;; # Safe default / Bezpieczny standard
+        *)   echo "0024" ;; # Safe default
     esac
 }
 
 # ==============================================================================
 # 5. MODE EXECUTION FUNCTIONS (SET)
-# 5. FUNKCJE WYKONAWCZE TRYBÓW (SET)
 # ==============================================================================
 set2() {
-    # Mode 2: Authorize eGPU via boltctl and save device name
-    # Mode 2: Autoryzacja eGPU przez boltctl i zapis nazwy
     local DEV_UUID
     DEV_UUID=$(boltctl list 2>/dev/null | grep -B5 -E 'status:[[:space:]]+connected$' | grep -m1 "uuid:" | cut -d ':' -f2 | xargs || true)
 
@@ -211,8 +204,24 @@ set3() {
     # Mode 3: Hybrid mode (iGPU + eGPU / load NVIDIA modules, PCIe retraining)
     # Mode 3: Tryb hybrydowy (iGPU + eGPU / moduły nvidia, retraining PCIe)
     if ! lspci -d 10de: -nn 2>/dev/null | grep -q -iE "VGA|3D"; then
-        fuser -k /dev/nvidia* >/dev/null 2>&1 || true
+        # 1. Zabezpieczenie przed zabiciem kompozytora Wayland (KWin / Plasma)
+        local KWIN_PID PLASMA_PID
+        KWIN_PID=$(pidof kwin_wayland 2>/dev/null || true)
+        PLASMA_PID=$(pidof plasmashell 2>/dev/null || true)
+
+        for dev in /dev/nvidia* /dev/nvidiactl; do
+            [ -e "$dev" ] || continue
+            for pid in $(fuser "$dev" 2>/dev/null || true); do
+                if [ "$pid" != "$KWIN_PID" ] && [ "$pid" != "$PLASMA_PID" ]; then
+                    kill -9 "$pid" 2>/dev/null || true
+                fi
+            done
+        done
+
         modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia >/dev/null 2>&1 || true
+
+        # 2. Załaduj moduł bazowy z parametrem DPM=0 ZANIM rescan wywoła udev modalias
+        modprobe nvidia NVreg_DynamicPowerManagement=0x00 >/dev/null 2>&1 || true
 
         if command -v boltctl >/dev/null 2>&1; then
             local PENDING_UUIDS
@@ -224,18 +233,16 @@ set3() {
 
         touch /tmp/egpu_allow
 
-        # 1. Obudź wszystkie mostki Root Port bezpośrednio na szynie głównej procesora (Intel i AMD)
+        # 3. Rescan Root Ports i magistrali PCIe
         for rp in /sys/bus/pci/devices/0000:00:*.*/rescan; do
             [ -f "$rp" ] && echo 1 > "$rp" 2>/dev/null || true
         done
-
-        # 2. Globalny rescan szyny PCIe (dla Hot-Plug i propagacji w dół)
         echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
 
         udevadm settle --timeout=2 2>/dev/null || true
         rm -f /tmp/egpu_allow
 
-        # Czekaj do 2 sekund na pojawienie się karty na magistrali PCI
+        # Czekaj na pojawienie się karty
         local GPU_FULL_PCI=""
         local retries=0
         while [ $retries -lt 20 ]; do
@@ -250,6 +257,22 @@ set3() {
         if [ -z "$GPU_FULL_PCI" ]; then
             echo "2"
             return 0
+        fi
+
+        # 4. Sprawdzenie alokacji BAR0 (ochrona przed błędem 0M @ 0x0 przy dwufazowej enumeracji)
+        local BAR0_VAL
+        BAR0_VAL=$(awk 'NR==1 {print $1}' /sys/bus/pci/devices/"$GPU_FULL_PCI"/resource 2>/dev/null || echo "0x0")
+        if [ "$BAR0_VAL" = "0x0000000000000000" ] || [ "$BAR0_VAL" = "0x0" ] || [ -z "$BAR0_VAL" ]; then
+            local PCI_TREE_PROBE UPSTREAM_PORT
+            PCI_TREE_PROBE=$(lspci -D -PP -s "$GPU_FULL_PCI" 2>/dev/null | awk '{print $1}' || true)
+            UPSTREAM_PORT=$(echo "$PCI_TREE_PROBE" | awk -F'/' '{if (NF>2) print $(NF-2); else print ""}' || true)
+
+            if [ -n "$UPSTREAM_PORT" ] && [ -w "/sys/bus/pci/devices/$UPSTREAM_PORT/remove" ]; then
+                echo 1 > "/sys/bus/pci/devices/$UPSTREAM_PORT/remove" 2>/dev/null || true
+                sleep 8
+                echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+                udevadm settle --timeout=3 2>/dev/null || true
+            fi
         fi
 
         local PCI_TREE BRIDGE_LIST TOTAL_NODES PARENT_PORT TARGET_HEX
@@ -286,7 +309,6 @@ set3() {
         fi
 
         sleep 0.5
-        modprobe nvidia NVreg_DynamicPowerManagement=0x00 >/dev/null 2>&1 || true
 
         if [ -n "${PARENT_PORT:-}" ]; then
             setpci -s "$PARENT_PORT" CAP_EXP+30.w="$TARGET_HEX:002f" >/dev/null 2>&1 || true
@@ -306,16 +328,12 @@ set3() {
         nvidia-smi --lock-memory-clocks="${MAX_MEM:-14001},${MAX_MEM:-14001}" >/dev/null 2>&1 || true
     fi
 
-    # Save exact GPU model name after module loading
-    # Zapis dokładnej nazwy modelu karty po załadowaniu modułów
     local EGPU_MODEL
     EGPU_MODEL=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | xargs || true)
     if [ -n "$EGPU_MODEL" ]; then
         echo "$EGPU_MODEL" > "$EGPU2_FILE"
     fi
 
-    # Save active PCIe link speed and generation to cache
-    # Zapis aktualnego linku PCIe do cache
     local CURRENT_LINK
     CURRENT_LINK=$(lspci -d 10de: -vv 2>/dev/null | awk '/LnkSta:/ {for(i=1;i<=NF;i++) if($i ~ /Speed/) {
         speed=$(i+1);
@@ -335,11 +353,6 @@ set3() {
 }
 
 set4() {
-    # Mode 4: eGPU-only mode (disconnect iGPU from PCI bus tree)
-    # Mode 4: Tryb eGPU-only (odłączanie iGPU z drzewa PCI)
-
-    # Mode 4: Save persistent eGPU-only flag and reset wait
-    # Mode 4: Zapisanie trwałej flagi trybu eGPU-only
     echo "1" > "$EGPU_ONLY_FILE"
     echo "4" > "$STATE_FILE"
     echo "0" > "$WAIT_FILE"
@@ -354,12 +367,9 @@ set4() {
         vendor=$(cat "$dev/vendor" 2>/dev/null || true)
         class=$(cat "$dev/class" 2>/dev/null || true)
 
-        # Check for VGA/Display devices (class 0x03xxxx) for AMD (0x1002) and Intel (0x8086)
-        # Sprawdzanie urządzeń VGA/Display (klasa 0x03xxxx) dla AMD (0x1002) oraz Intel (0x8086)
         if [[ "$class" =~ ^0x03 ]] && { [ "$vendor" = "0x1002" ] || [ "$vendor" = "0x8086" ]; }; then
             local addr=$(basename "$dev")
 
-            # Pobierz i zapisz port nadrzędny (Parent Bridge) przed usunięciem
             local pci_tree parent_bridge
             pci_tree=$(lspci -D -PP -s "$addr" 2>/dev/null | awk '{print $1}' || true)
             parent_bridge=$(echo "$pci_tree" | awk -F'/' '{if (NF>1) print $(NF-1); else print $1}' || true)
@@ -370,28 +380,21 @@ set4() {
             local base_slot="${addr%.*}"
             local audio_addr="${base_slot}.1"
 
-            # 2. Zwolnij procesy trzymające I2C / DRM na kontrolerze iGPU
             fuser -k /dev/i2c-* >/dev/null 2>&1 || true
             fuser -k "/sys/bus/pci/devices/$addr" >/dev/null 2>&1 || true
             sleep 0.2
-            # Powiadomienie DRM o zmianie konfiguracji i pauza na zwolnienie uchwytów
             udevadm trigger --subsystem-match=drm --action=change 2>/dev/null || true
             sleep 0.2
 
-            # 3. Unbind sterownika graficznego (kluczowe zabezpieczenie przed stanem D-state)
             if [ -d "$dev/driver" ]; then
                 echo "$addr" > "$dev/driver/unbind" 2>/dev/null || true
             fi
             sleep 0.1
 
-            # Remove processor-integrated audio device
-            # Odcięcie zintegrowanego audio powiązanego z procesorem
             if [ -d "/sys/bus/pci/devices/$audio_addr" ]; then
                 echo 1 > "/sys/bus/pci/devices/$audio_addr/remove" 2>/dev/null || true
             fi
 
-            # Remove iGPU display controller with safety guard
-            # Odcięcie magistrali graficznej iGPU z asekuracją || true
             echo 1 > "/sys/bus/pci/devices/$addr/remove" 2>/dev/null || true
             found_igpu=1
         fi
@@ -405,10 +408,8 @@ set4() {
 }
 
 set5() {
-    # Mode 5: Universal iGPU restore (AMD amdgpu / Intel i915 / Intel xe)
     rm -f "$EGPU_ONLY_FILE"
 
-    # 1. Rescan celowany w mostek nadrzędny iGPU (oraz fallback na szynę główną)
     local parent_bridge=""
     if [ -f "$IGPU_PARENT_FILE" ]; then
         parent_bridge=$(cat "$IGPU_PARENT_FILE" 2>/dev/null || true)
@@ -422,7 +423,6 @@ set5() {
 
     rm -f "$IGPU_PARENT_FILE"
 
-    # 2. Synchronizacja udev i wyzwolenie zdarzeń DRM dla kompozytora
     udevadm settle --timeout=3 2>/dev/null || true
     udevadm trigger --subsystem-match=drm --action=change 2>/dev/null || true
     udevadm settle --timeout=2 2>/dev/null || true
@@ -501,22 +501,37 @@ set6() {
     # 5. Synchronizacja kolejki udev
     udevadm settle --timeout=2 2>/dev/null || true
 
+    # 3. Przywróć metadane i flagę SOUND_INITIALIZED dla wszystkich kart audio (USB DAC, Soundbar, wbudowane)
+    for card in /sys/class/sound/card[0-9]*; do
+        [ -d "$card" ] || continue
+        # Pomiń karty odpinanego eGPU
+        if [ -n "${GPU_FULL_PCI:-}" ] && [[ "$card" =~ $GPU_FULL_PCI ]]; then
+            continue
+        fi
+        # Wywołaj add TYLKO jeśli karta straciła inicjalizację
+        if ! udevadm info -p "$card" 2>/dev/null | grep -q "SOUND_INITIALIZED=1"; then
+            udevadm trigger --action=add "$card" 2>/dev/null || true
+        fi
+    done
+
     echo "0" > "$WAIT_FILE"
     echo "2"
 }
 
 # ==============================================================================
 # 6. SET COMMAND HANDLER (Cascading step-up execution with wait flag)
-# 6. OBSŁUGA POLECENIA SET (Kaskadowe przejście w górę z flagą wait)
 # ==============================================================================
 if [ "$ACTION" = "set" ]; then
     if [[ ! "$TARGET_MODE" =~ ^[2-6]$ ]]; then
         exit 0
     fi
 
+    if [ "$EUID" -ne 0 ]; then
+        exit 0
+    fi
+
     CURRENT=$(cat "$STATE_FILE" 2>/dev/null || echo "1")
 
-    # Direct jump: from Mode 3 straight to Safe Detach (Mode 6) without triggering 4/5
     if [ "$TARGET_MODE" = "6" ]; then
         if [ "$CURRENT" = "3" ]; then
             echo "1" > "$WAIT_FILE"

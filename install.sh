@@ -59,6 +59,9 @@ sudo chmod +x /usr/local/bin/blackwell-egpu
 echo "[+] Installed /usr/local/bin/blackwell-egpu"
 
 echo "=== 3. Configuring sudoers permissions ==="
+if sudo test -f "/etc/sudoers.d/blackwell-egpu"; then
+    echo "[*] Existing sudoers configuration detected. Updating..."
+fi
 echo "$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/local/bin/blackwell-egpu" | sudo tee "/etc/sudoers.d/blackwell-egpu" > /dev/null
 sudo chmod 0440 "/etc/sudoers.d/blackwell-egpu"
 echo "[+] Configured /etc/sudoers.d/blackwell-egpu"
@@ -263,19 +266,16 @@ case "$CHOSEN" in
         cp -r "$GNOME_SRC" "$GNOME_DEST"
         echo "[+] GNOME Shell extension files copied."
 
-        # Pytanie o automatyczne włączenie apletu z domyślnym wyborem: TAK
         read -r -p "Enable Blackwell eGPU extension by default? [Y/n]: " ENABLE_EXT_CHOICE
         ENABLE_EXT_CHOICE=${ENABLE_EXT_CHOICE:-Y}
 
         if [[ "$ENABLE_EXT_CHOICE" =~ ^[Yy]$ ]]; then
             UUID="blackwell-egpu@com.github.blackwellegpu"
 
-            # 1. Próba standardowa przez CLI GNOME
             if command -v gnome-extensions &>/dev/null; then
                 gnome-extensions enable "$UUID" 2>/dev/null || true
             fi
 
-            # 2. Bezpośrednie wstrzyknięcie do dconf/gsettings (kluczowe na świeżej sesji / Live CD)
             if command -v gsettings &>/dev/null; then
                 CURRENT_EXTS=$(gsettings get org.gnome.shell enabled-extensions)
                 if ! echo "$CURRENT_EXTS" | grep -q "$UUID"; then
@@ -292,7 +292,6 @@ case "$CHOSEN" in
             echo "[*] Extension installed in disabled state."
         fi
 
-        # Wykrywanie typu sesji i propozycja restartu powłoki / sesji
         SESSION_TYPE="${XDG_SESSION_TYPE:-unknown}"
 
         if [ "$SESSION_TYPE" = "wayland" ]; then

@@ -16,6 +16,7 @@ PLASMA_APPLET_DIR="$HOME/.local/share/plasma/plasmoids/com.github.blackwellegpu"
 GNOME_EXTENSION_DIR="$HOME/.local/share/gnome-shell/extensions/blackwell-egpu@com.github.blackwellegpu"
 TRAY_BIN="/usr/local/bin/blackwell-tray.py"
 AUTOSTART_FILE="$HOME/.config/autostart/blackwell-tray.desktop"
+MODPROBE_FILE="/etc/modprobe.d/99-blackwell-egpu.conf"
 
 echo "=== 1. Removing CLI backend and sudoers permissions ==="
 if [ -f "/usr/local/bin/blackwell-egpu" ]; then
@@ -23,12 +24,12 @@ if [ -f "/usr/local/bin/blackwell-egpu" ]; then
     echo "[+] Removed /usr/local/bin/blackwell-egpu"
 fi
 
-if [ -f "/etc/sudoers.d/blackwell-egpu" ]; then
+if sudo test -f "/etc/sudoers.d/blackwell-egpu"; then
     sudo rm -f "/etc/sudoers.d/blackwell-egpu"
     echo "[+] Removed /etc/sudoers.d/blackwell-egpu"
 fi
 
-echo "=== 2. Managing udev rules ==="
+echo "=== 2. Managing udev rules configuration ==="
 if [ -f "/etc/udev/rules.d/99-blackwell-egpu.rules" ]; then
     echo "----------------------------------------------------------------------"
     echo "[i] NOTICE: Custom udev rules (/etc/udev/rules.d/99-blackwell-egpu.rules)"
