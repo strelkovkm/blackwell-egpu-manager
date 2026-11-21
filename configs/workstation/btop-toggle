@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+if pgrep -f "tmux -L btop attach" >/dev/null 2>&1; then
+    pkill -f "tmux -L btop attach"
+else
+    systemctl --user is-active --quiet btop-bg.service || systemctl --user start btop-bg.service
+    exec gnome-terminal --maximize --hide-menubar --zoom=0.85 --title="btop++" -- /usr/bin/tmux -L btop attach -t monitor
+fi

@@ -1,0 +1,13 @@
+[Unit]
+Description=Background btop++ collector (instant history graphs)
+After=graphical-session.target
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/tmux -L btop -f %h/.config/btop/tmux.conf new-session -d -s monitor -x 215 -y 58 /usr/local/bin/btop
+ExecStop=/usr/bin/tmux -L btop kill-server
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

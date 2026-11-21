@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Run Discord strictly on AMD Radeon 780M iGPU (completely invisible to NVIDIA eGPU)
+export CUDA_VISIBLE_DEVICES=""
+export NVIDIA_VISIBLE_DEVICES="void"
+export __NV_PRIME_RENDER_OFFLOAD=0
+export __GLX_VENDOR_LIBRARY_NAME=mesa
+export VK_ICD_FILENAMES="/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
+export DRI_PRIME="pci-0000_64_00_0"
+
+exec /usr/bin/discord "$@"

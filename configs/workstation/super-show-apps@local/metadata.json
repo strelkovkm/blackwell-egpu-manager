@@ -1,0 +1,7 @@
+{
+  "uuid": "super-show-apps@local",
+  "name": "Super Key to Show Apps",
+  "description": "Opens Show Apps grid directly on solo Super press while keeping Overview on Alt+Tab",
+  "shell-version": ["46", "47", "48", "49", "50"],
+  "version": 1
+}

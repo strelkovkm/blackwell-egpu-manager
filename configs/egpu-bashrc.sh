@@ -24,6 +24,7 @@ egpu-on() {
     mode=$(echo "$st" | grep -o '"mode":[0-9]' | cut -d: -f2)
     link=$(echo "$st" | grep -o '"link":"[^"]*"' | cut -d'"' -f4)
     if [ "$mode" = "3" ]; then
+        systemctl --user restart btop-bg.service 2>/dev/null || true
         echo "[eGPU] Online! Link: ${link:-OK}"
         nvidia-smi
     else
@@ -34,10 +35,12 @@ egpu-on() {
 
 egpu-off() {
     echo "[eGPU] Safely detaching GPU (Mode 6)..."
+    systemctl --user stop btop-bg.service 2>/dev/null || true
     sudo blackwell-egpu set 6
     local st mode
     st=$(blackwell-egpu status)
     mode=$(echo "$st" | grep -o '"mode":[0-9]' | cut -d: -f2)
+    systemctl --user start btop-bg.service 2>/dev/null || true
     if [ "$mode" != "3" ]; then
         echo "[eGPU] Detached safely. Safe to unplug USB4 cable."
     else

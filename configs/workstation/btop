@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+CONF="$HOME/.config/btop/btop.conf"
+if [ -f "$CONF" ]; then
+    sed -i '/^custom_gpu_name[01]/d; /^shown_boxes/d' "$CONF"
+    if [ -e /dev/nvidia0 ]; then
+        cat >> "$CONF" << 'CFG'
+shown_boxes = "cpu gpu1 gpu0 mem net proc"
+custom_gpu_name0 = ""
+custom_gpu_name1 = "AMD Radeon 780M"
+CFG
+    else
+        cat >> "$CONF" << 'CFG'
+shown_boxes = "cpu gpu0 mem net proc"
+custom_gpu_name0 = "AMD Radeon 780M"
+custom_gpu_name1 = ""
+CFG
+    fi
+fi
+exec /usr/local/bin/btop.bin "$@"
