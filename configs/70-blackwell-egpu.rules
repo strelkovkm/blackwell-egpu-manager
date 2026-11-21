@@ -1,0 +1,17 @@
+# Keep AMD Family 19h USB4/Thunderbolt PCIe Tunnel & NHI awake (prevents D3cold Sync Flood)
+ACTION=="add|change", SUBSYSTEM=="pci", ATTR{vendor}=="0x1022", ATTR{device}=="0x14ef", ATTR{power/control}="on"
+ACTION=="add|change", SUBSYSTEM=="pci", ATTR{vendor}=="0x1022", ATTR{device}=="0x1668", ATTR{power/control}="on"
+ACTION=="add|change", SUBSYSTEM=="pci", ATTR{vendor}=="0x1022", ATTR{device}=="0x1669", ATTR{power/control}="on"
+
+# Block premature driver binding to NVIDIA devices during unconfigured auto-auth
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", TEST!="/tmp/egpu_allow", ATTR{driver_override}="none"
+
+# Intel Barlow Ridge (TB5)
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x5786", TEST!="/tmp/egpu_allow", ATTR{remove}="1"
+
+# ASMedia ASM2464PD (USB4)
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1b21", ATTR{device}=="0x2464", TEST!="/tmp/egpu_allow", ATTR{remove}="1"
+
+# Intel Goshen / Titan Ridge (TB3/TB4)
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x15eb", TEST!="/tmp/egpu_allow", ATTR{remove}="1"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x0b26", TEST!="/tmp/egpu_allow", ATTR{remove}="1"

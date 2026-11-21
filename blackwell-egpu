@@ -171,10 +171,10 @@ negotiate_optimal_link_speed() {
     fi
 
     case "$min_speed" in
-        32*) echo "0025" ;; # Gen5
-        16*) echo "0024" ;; # Gen4
-        8*)  echo "0023" ;; # Gen3
-        *)   echo "0024" ;; # Safe default
+        32*) echo "0005" ;; # Gen5 (HASD=0)
+        16*) echo "0004" ;; # Gen4 (HASD=0)
+        8*)  echo "0003" ;; # Gen3 (HASD=0)
+        *)   echo "0004" ;; # Safe default (HASD=0)
     esac
 }
 
@@ -186,7 +186,9 @@ set2() {
     DEV_UUID=$(boltctl list 2>/dev/null | grep -B5 -E 'status:[[:space:]]+connected$' | grep -m1 "uuid:" | cut -d ':' -f2 | xargs || true)
 
     if [ -n "$DEV_UUID" ]; then
-        boltctl enroll "$DEV_UUID" >/dev/null 2>&1 || true
+        boltctl authorize "$DEV_UUID" >/dev/null 2>&1 || true
+        udevadm settle --timeout=4 >/dev/null 2>&1 || true
+        sleep 1
     fi
 
     local BOLT_INFO
@@ -204,42 +206,53 @@ set3() {
     # Mode 3: Hybrid mode (iGPU + eGPU / load NVIDIA modules, PCIe retraining)
     # Mode 3: Tryb hybrydowy (iGPU + eGPU / moduły nvidia, retraining PCIe)
     if ! lspci -d 10de: -nn 2>/dev/null | grep -q -iE "VGA|3D"; then
-        # 1. Zabezpieczenie przed zabiciem kompozytora Wayland (KWin / Plasma)
-        local KWIN_PID PLASMA_PID
-        KWIN_PID=$(pidof kwin_wayland 2>/dev/null || true)
-        PLASMA_PID=$(pidof plasmashell 2>/dev/null || true)
-
+        # 1. Protect Wayland/X11 compositors (GNOME / KDE / Xwayland)
+        local pcomm=""
         for dev in /dev/nvidia* /dev/nvidiactl; do
             [ -e "$dev" ] || continue
             for pid in $(fuser "$dev" 2>/dev/null || true); do
-                if [ "$pid" != "$KWIN_PID" ] && [ "$pid" != "$PLASMA_PID" ]; then
-                    kill -9 "$pid" 2>/dev/null || true
-                fi
+                pcomm=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+                case "$pcomm" in
+                    gnome-shell|kwin_wayland|plasmashell|Xwayland|Xorg|mutter*) continue ;;
+                esac
+                kill -9 "$pid" 2>/dev/null || true
             done
         done
 
-        modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia >/dev/null 2>&1 || true
+        for m in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do modprobe -r "$m" >/dev/null 2>&1 || true; done
 
-        # 2. Załaduj moduł bazowy z parametrem DPM=0 ZANIM rescan wywoła udev modalias
-        modprobe nvidia NVreg_DynamicPowerManagement=0x00 >/dev/null 2>&1 || true
+        # 2. Wake AMD USB4 PCIe Tunnel Root Port (1022:14ef) & hold driver autoprobe
+        local usb4_rp=""
+        for dev_dir in /sys/bus/pci/devices/0000:00:*.*; do
+            [ -d "$dev_dir" ] || continue
+            if [ "$(cat "$dev_dir/vendor" 2>/dev/null || true)" = "0x1022" ] && \
+               [ "$(cat "$dev_dir/device" 2>/dev/null || true)" = "0x14ef" ]; then
+                echo on > "$dev_dir/power/control" 2>/dev/null || true
+                usb4_rp="$dev_dir"
+            fi
+        done
+        sleep 0.3
 
-        if command -v boltctl >/dev/null 2>&1; then
-            local PENDING_UUIDS
-            PENDING_UUIDS=$(boltctl list 2>/dev/null | awk '/ ● / {uuid=$2} /status:[[:space:]]+(connected|authorizing)/ {print uuid}' || true)
-            for uuid in $PENDING_UUIDS; do
-                boltctl enroll --policy auto "$uuid" >/dev/null 2>&1 || boltctl authorize "$uuid" >/dev/null 2>&1 || true
-            done
-        fi
-
+        echo 0 > /sys/bus/pci/drivers_autoprobe 2>/dev/null || true
         touch /tmp/egpu_allow
 
-        # 3. Rescan Root Ports i magistrali PCIe
-        for rp in /sys/bus/pci/devices/0000:00:*.*/rescan; do
-            [ -f "$rp" ] && echo 1 > "$rp" 2>/dev/null || true
-        done
-        echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+        if command -v boltctl >/dev/null 2>&1; then
+            local PENDING_UUIDS=""
+            PENDING_UUIDS=$(boltctl list 2>/dev/null | awk '/ ● / {uuid=$2} /status:[[:space:]]+(connected|authorizing)/ {print uuid}' || true)
+            for uuid in $PENDING_UUIDS; do
+                boltctl authorize "$uuid" >/dev/null 2>&1 || true
+            done
+            udevadm settle --timeout=3 >/dev/null 2>&1 || true
+        fi
 
-        udevadm settle --timeout=2 2>/dev/null || true
+        # 3. Rescan ONLY the AMD USB4 Tunnel Root Port
+        if [ -n "$usb4_rp" ] && [ -f "$usb4_rp/rescan" ]; then
+            echo 1 > "$usb4_rp/rescan" 2>/dev/null || true
+        else
+            echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+        fi
+
+        udevadm settle --timeout=2 >/dev/null 2>&1 || true
         rm -f /tmp/egpu_allow
 
         # Czekaj na pojawienie się karty
@@ -255,6 +268,7 @@ set3() {
         done
 
         if [ -z "$GPU_FULL_PCI" ]; then
+            echo 1 > /sys/bus/pci/drivers_autoprobe 2>/dev/null || true
             echo "2"
             return 0
         fi
@@ -314,8 +328,23 @@ set3() {
             setpci -s "$PARENT_PORT" CAP_EXP+30.w="$TARGET_HEX:002f" >/dev/null 2>&1 || true
         fi
 
-        modprobe nvidia_modeset nvidia_drm nvidia_uvm >/dev/null 2>&1 || true
-        udevadm settle || true
+        # Bind compute/modeset drivers (skipping nvidia_drm so GNOME never pins modules in RAM)
+        echo 1 > /sys/bus/pci/drivers_autoprobe 2>/dev/null || true
+        modprobe nvidia NVreg_DynamicPowerManagement=0x00 >/dev/null 2>&1 || true
+
+        if [ -n "${BRIDGE_LIST[0]:-}" ] && [ -d "/sys/bus/pci/devices/${BRIDGE_LIST[0]}" ]; then
+            local real_rp="" pdev=""
+            real_rp=$(readlink -f "/sys/bus/pci/devices/${BRIDGE_LIST[0]}" 2>/dev/null || true)
+            if [ -n "$real_rp" ] && [ -d "$real_rp" ]; then
+                for pdev in $(find "$real_rp" -maxdepth 6 -name "0000:*:*.[0-9]" 2>/dev/null | sort); do
+                    echo "" > "$pdev/driver_override" 2>/dev/null || true
+                    basename "$pdev" > /sys/bus/pci/drivers_probe 2>/dev/null || true
+                done
+            fi
+        fi
+
+        modprobe nvidia_modeset nvidia_uvm >/dev/null 2>&1 || true
+        udevadm settle >/dev/null 2>&1 || true
 
         nvidia-smi -pm 1 >/dev/null 2>&1 || true
 
@@ -326,6 +355,7 @@ set3() {
         nvidia-smi --auto-boost-permission=0 >/dev/null 2>&1 || true
         nvidia-smi --lock-gpu-clocks="2000,${MAX_GPU:-3090}" >/dev/null 2>&1 || true
         nvidia-smi --lock-memory-clocks="${MAX_MEM:-14001},${MAX_MEM:-14001}" >/dev/null 2>&1 || true
+        sleep 1.0
     fi
 
     local EGPU_MODEL
@@ -436,9 +466,17 @@ set6() {
     # Mode 6: Safe eGPU Detach without killing Wayland session compositor
     # Mode 6: Bezpieczne odpięcie eGPU z automatycznym zamykaniem aplikacji klienckich
 
-    # 1. Pobierz aktywne PID-y aplikacji (C/G) bezpośrednio z nvidia-smi pmon
-    local ACTIVE_PIDS
-    ACTIVE_PIDS=$(nvidia-smi pmon -c 1 2>/dev/null | awk '$3 ~ /^[CG]/ {print $2}' | grep -E '^[0-9]+$' || true)
+    # 1. Get active client PIDs while protecting Wayland/X11 compositors
+    local RAW_PIDS="" ACTIVE_PIDS="" pcomm=""
+    RAW_PIDS=$(nvidia-smi pmon -c 1 2>/dev/null | awk '$3 ~ /^[CG]/ {print $2}' | grep -E '^[0-9]+$' || true)
+    for pid in $RAW_PIDS; do
+        pcomm=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+        case "$pcomm" in
+            gnome-shell|kwin_wayland|Xwayland|Xorg|mutter*) continue ;;
+        esac
+        ACTIVE_PIDS="$ACTIVE_PIDS $pid"
+    done
+    ACTIVE_PIDS=$(echo "$ACTIVE_PIDS" | xargs || true)
 
     if [ -n "$ACTIVE_PIDS" ]; then
         local SIGNAL=15
@@ -487,15 +525,25 @@ set6() {
             fi
         done
 
-        # 3. Daj kompozytorowi czas na przetworzenie zdarzenia
-        udevadm settle --timeout=1 2>/dev/null || true
+        # 3. Unlock clocks, stop persistence daemon & unload ALL NVIDIA modules cleanly to 0
+        nvidia-smi -rgc >/dev/null 2>&1 || true
+        nvidia-smi -rmc >/dev/null 2>&1 || true
+        nvidia-smi -pm 0 >/dev/null 2>&1 || true
+        systemctl stop nvidia-persistenced >/dev/null 2>&1 || true
+        pkill -f nvidia-persistenced >/dev/null 2>&1 || true
+        sleep 0.4
+        for m in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do modprobe -r "$m" >/dev/null 2>&1 || true; done
         sleep 0.2
 
-
-        # Na końcu sam kontroler graficzny
+        local GPU_AUDIO_PCI="${GPU_FULL_PCI%.*}.1"
+        if [ -w "/sys/bus/pci/devices/$GPU_AUDIO_PCI/remove" ]; then
+            echo 1 > "/sys/bus/pci/devices/$GPU_AUDIO_PCI/remove" 2>/dev/null || true
+        fi
         if [ -w "/sys/bus/pci/devices/$GPU_FULL_PCI/remove" ]; then
             echo 1 > "/sys/bus/pci/devices/$GPU_FULL_PCI/remove" 2>/dev/null || true
         fi
+        sleep 0.3
+        for m in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do modprobe -r "$m" >/dev/null 2>&1 || true; done
     fi
 
     # 5. Synchronizacja kolejki udev
@@ -535,7 +583,7 @@ if [ "$ACTION" = "set" ]; then
     if [ "$TARGET_MODE" = "6" ]; then
         if [ "$CURRENT" = "3" ]; then
             echo "1" > "$WAIT_FILE"
-            trap 'echo "0" > "$WAIT_FILE"' EXIT INT TERM
+            trap 'echo 1 > /sys/bus/pci/drivers_autoprobe 2>/dev/null || true; rm -f /tmp/egpu_allow; echo "0" > "$WAIT_FILE"' EXIT INT TERM
             RESULT=$(set6 | tail -n1 | tr -dc '0-9')
             echo "${RESULT:-2}" > "$STATE_FILE"
             exit 0
